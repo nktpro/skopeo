@@ -96,6 +96,7 @@ func NewTransport() *http.Transport {
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
 		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
 	}
 	return tr
 }
