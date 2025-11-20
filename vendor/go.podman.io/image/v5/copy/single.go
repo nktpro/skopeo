@@ -434,6 +434,23 @@ func (ic *imageCopier) compareImageDestinationManifestEqual(ctx context.Context,
 
 // copyLayers copies layers from ic.src/ic.c.rawSource to dest, using and updating ic.manifestUpdates if necessary and ic.cannotModifyManifestReason == "".
 func (ic *imageCopier) copyLayers(ctx context.Context) ([]compressiontypes.Algorithm, error) {
+	// Start uploading the config blob in parallel, if safe.
+	var configUploadFuture func() error
+	// If we need DiffIDs, we might be generating a new config blob, so we must wait.
+	// If we don't need DiffIDs, the config blob is likely stable (or we can reuse the existing one if it doesn't change).
+	if !ic.diffIDsAreNeeded {
+		done := make(chan error, 1)
+		go func() {
+			// Note: this uses ic.src, not pendingImage. If UpdatedImage produces a different config,
+			// this upload will be ignored (but still consumes bandwidth).
+			// This is generally safe because if the config digest matches, we save time.
+			// We use a separate context to ensure this background task doesn't block arbitrarily if the main context is cancelled?
+			// No, use the same context.
+			done <- ic.copyConfig(ctx, ic.src)
+		}()
+		configUploadFuture = func() error { return <-done }
+	}
+
 	srcInfos := ic.src.LayerInfos()
 	updatedSrcInfos, err := ic.src.LayerInfosForCopy(ctx)
 	if err != nil {
@@ -557,6 +574,16 @@ func (ic *imageCopier) copyLayers(ctx context.Context) ([]compressiontypes.Algor
 	if err != nil {
 		return nil, err
 	}
+
+	// If we started a background config upload, wait for it.
+	// We don't strictly fail if it failed; the main path will retry in copyUpdatedConfigAndManifest.
+	// But waiting ensures we don't race or leave a goroutine leaking if we return early.
+	if configUploadFuture != nil {
+		if err := configUploadFuture(); err != nil {
+			logrus.Debugf("Background config upload failed: %v", err)
+		}
+	}
+
 	return algos, nil
 }
 
